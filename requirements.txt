@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+faker
+sentence-transformers
+python-Levenshtein

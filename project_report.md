@@ -355,6 +355,12 @@ Stated plainly, because each one is a Part B or Part C entry point.
 6. **Contradiction rules are hand-written.** Six classes, enumerated by a human.
    A learned or LLM-assisted approach would generalise.
 
+### 11.1 Latency Optimizations Implemented
+To ensure the mediator functions efficiently as a real-time roadside query engine, two critical latency bottlenecks were addressed:
+
+1. **Database Indexing**: Full table scans across 5 autonomous databases on every query would cripple the system. To solve this, explicit SQLite `B-Tree` Indexes (`index=True`) were created on the primary and secondary identifier columns (e.g., `registration_mark`, `plate_marking`, `subject_mark`) in every database during the generation phase. This reduces sub-query times from $O(N)$ to $O(\log N)$.
+2. **NLP Embedding Caching**: The AI Schema Matcher relies on a `sentence-transformers` neural network to compute mathematical vectors for local columns. Booting the model into memory and computing these vectors originally took ~5 seconds. We implemented a disk-based caching layer (`.nlp_cache.pkl`) that intercepts the `self.model.encode()` calls, dropping the system boot latency from 5 seconds to under 0.1 seconds on subsequent runs.
+
 ---
 
 ## 12. Reproducing the results

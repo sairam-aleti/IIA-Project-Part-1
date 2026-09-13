@@ -11,3 +11,5 @@ iia_project/
 *.db
 *.sqlite3
 .DS_Store
+
+.nlp_cache.pkl

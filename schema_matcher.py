@@ -139,11 +139,11 @@ GLOBAL_SCHEMA = {
     },
     "finding": {
         "kind": "text",
-        "description": "compliance finding raised against the vehicle",
+        "description": "compliance finding or outcome verdict reached against the vehicle",
     },
     "severity": {
         "kind": "text",
-        "description": "seriousness assigned to the finding",
+        "description": "severity level or seriousness assigned to the finding",
     },
     "finding_confidence": {
         "kind": "float",
@@ -151,7 +151,7 @@ GLOBAL_SCHEMA = {
     },
     "evidence": {
         "kind": "text",
-        "description": "supporting evidence recorded with the finding",
+        "description": "json payload containing supporting evidence recorded with the finding",
     },
     "raised_on": {
         "kind": "datetime",
@@ -288,9 +288,34 @@ class _SemanticScorer:
         if not self.available:
             return None
         import numpy as np
-        phrases = [c.replace("_", " ") for c in column_names]
-        col_vecs = self.model.encode(phrases, normalize_embeddings=True)
-        desc_vecs = self.model.encode(descriptions, normalize_embeddings=True)
+        import pickle
+        import os
+        import hashlib
+        
+        phrases = tuple(c.replace("_", " ") for c in column_names)
+        descriptions = tuple(descriptions)
+        
+        cache_file = ".nlp_cache.pkl"
+        cache = {}
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "rb") as f:
+                    cache = pickle.load(f)
+            except Exception:
+                pass
+                
+        def get_cached_embeddings(text_list, cache_key_prefix):
+            key = hashlib.md5(str(text_list).encode()).hexdigest()
+            if key not in cache:
+                cache[key] = self.model.encode(text_list, normalize_embeddings=True)
+            return cache[key]
+
+        col_vecs = get_cached_embeddings(phrases, "cols")
+        desc_vecs = get_cached_embeddings(descriptions, "desc")
+        
+        with open(cache_file, "wb") as f:
+            pickle.dump(cache, f)
+            
         return np.asarray(col_vecs) @ np.asarray(desc_vecs).T
 
 

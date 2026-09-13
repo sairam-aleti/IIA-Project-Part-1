@@ -308,6 +308,14 @@ system.
 Abstentions are filed too. A record that the system looked and could not tell
 is exactly what an officer needs in order to go and look themselves.
 
+### 9.1 Understanding the User Interface (UI Tabs)
+
+The React dashboard visualizes this architecture through several distinct views:
+
+- **Flagged Vehicles**: This view filters the global state to show only vehicles that have returned a `SUSPICIOUS` or `UNINSURED` outcome. It highlights *why* they were flagged (e.g., Stolen, Scrapped, or Lapsed Insurance). It acts as the primary actionable queue for enforcement officers.
+- **Unattributed Reads**: This tab shows camera sightings (`anpr_reads`) where the license plate could not be linked to any registered vehicle in the RTO or Insurance databases, even after canonicalization (removing hyphens/spaces). These are essentially "ghost cars" that force the `INSUFFICIENT_EVIDENCE` outcome.
+- **Ministry Reports**: This acts as a live feed of the `mot.db` sink. Every time the system evaluates a vehicle and finds non-compliance (or abstains), a permanent audit log is generated here. It shows the Severity, Confidence, and the exact Contradiction rule that was triggered.
+
 ---
 
 ## 10. Distributed writes

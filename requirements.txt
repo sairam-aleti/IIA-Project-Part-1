@@ -1,6 +1,19 @@
-fastapi
-uvicorn[standard]
-sqlalchemy
-faker
-sentence-transformers
-python-Levenshtein
+# Web layer
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+
+# Source access
+SQLAlchemy>=2.0
+
+# Data generation
+Faker>=24.0
+
+# Schema matching
+# Levenshtein powers the lexical half of the matcher and is the only hard
+# requirement. sentence-transformers adds the semantic half; if it or its
+# model is unavailable the matcher falls back to lexical + type scoring and
+# reports that it has done so, so the system still runs offline.
+Levenshtein>=0.25
+sentence-transformers>=2.6
+numpy>=1.26

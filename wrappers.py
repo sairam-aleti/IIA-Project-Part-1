@@ -1,528 +1,412 @@
 """
-Source Wrappers
+Source wrappers
 ===============
-One wrapper per data source. Each wrapper:
-  - Accepts the SCHEMA_MAPPING configuration (no hardcoded column names).
-  - Executes local SQL queries using SQLAlchemy.
-  - Normalizes output (timestamps → ISO-8601, booleans, etc.).
-  - Tags every returned record with provenance metadata.
+One wrapper per source. A wrapper is configured entirely by the attribute
+mapping the schema matcher produced: it contains no local column names, so
+renaming a column in any source changes nothing here.
+
+Each wrapper returns *facts*, and every fact carries the same envelope:
+
+    {"value": ..., "source": "insurance", "column": "cover_upto",
+     "confidence": 1.0, "retrieved_at": "...", "derivation": None}
+
+In Part A every confidence is 1.0, because a value read directly out of a
+source is known with certainty — the uncertainty in Part A lives in identity
+resolution and in missing records, not in the values themselves. Part B will
+populate the same field with real probabilities, and nothing downstream needs
+to change shape.
+
+`record_count` distinguishes the two ways a source can fail to answer:
+    absent  — the source was reachable and holds no record for this vehicle
+    error   — the source could not be reached
+The mediator treats these very differently. Absence of an insurance record is
+strong evidence of non-insurance; an unreachable insurer is no evidence at all.
 """
 
 import os
-from datetime import date, datetime
 from abc import ABC, abstractmethod
+from datetime import date, datetime, timezone
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+
+import plate as plate_util
 
 
-# ==========================================
-# Base Wrapper
-# ==========================================
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
 
 class BaseWrapper(ABC):
-    """Abstract base for all source wrappers."""
+    """Shared machinery: mapped reads, normalisation, provenance."""
 
-    def __init__(self, db_path: str, source_name: str, schema_mapping: dict):
-        """
-        Args:
-            db_path:        Path to the SQLite database file.
-            source_name:    Logical name of this source (e.g. "camera_db").
-            schema_mapping: The full SCHEMA_MAPPING dict from schema_matcher.
-        """
+    source_name = None
+    cardinality = "one"          # "one" row per vehicle, or "many"
+
+    def __init__(self, db_path, source_conf, link_index):
         self.db_path = db_path
-        self.source_name = source_name
-        self.mapping = schema_mapping.get(source_name, {})
-        self.local_key = self.mapping.get("local_key")
-        self.table = self.mapping.get("table")
-        self.engine = create_engine(f"sqlite:///{db_path}")
-        self.Session = sessionmaker(bind=self.engine)
+        self.table = source_conf.get("table")
+        self.attributes = source_conf.get("attributes", {})
+        self.unmapped = source_conf.get("unmapped", [])
+        self.link_index = link_index
+        self.available = bool(self.table) and os.path.exists(db_path)
+        self.engine = create_engine(f"sqlite:///{db_path}") if self.available else None
 
-    @abstractmethod
-    def query(self, vehicle_identifier: str) -> dict | None:
-        """Query the local source for a given vehicle identifier."""
-        pass
+    # -- mapping helpers ----------------------------------------------
+    def column_for(self, attribute):
+        """Local column carrying a global attribute, or None if unmapped."""
+        info = self.attributes.get(attribute)
+        return info["column"] if info else None
 
-    @abstractmethod
-    def insert(self, data: dict) -> bool:
-        """Insert a new record into this source. Returns True on success."""
-        pass
-
-    @abstractmethod
-    def update(self, vehicle_identifier: str, data: dict) -> bool:
-        """Update an existing record. Returns True on success."""
-        pass
-
-    def delete(self, vehicle_identifier: str) -> bool:
-        """Delete a record by vehicle identifier. Shared implementation."""
-        session = self.Session()
-        try:
-            key_col = self.local_key
-            sql = text(f"DELETE FROM {self.table} WHERE {key_col} = :vid")
-            result = session.execute(sql, {"vid": vehicle_identifier})
-            session.commit()
-            return result.rowcount > 0
-        except Exception as e:
-            session.rollback()
-            print(f"[WRAPPER ERROR] Delete from {self.source_name} failed: {e}")
-            return False
-        finally:
-            session.close()
-
-    def _iso(self, value) -> str | None:
-        """Normalize a date/datetime to ISO-8601 string."""
-        if value is None:
+    def _fact(self, attribute, row, derivation=None, confidence=1.0):
+        """Lift one mapped attribute out of a row into a provenance-tagged fact."""
+        column = self.column_for(attribute)
+        if column is None:
             return None
+        value = row.get(column)
+        return {
+            "value": self._normalise(value),
+            "source": self.source_name,
+            "table": self.table,
+            "column": column,
+            "confidence": confidence,
+            "derivation": derivation,
+            "retrieved_at": _now(),
+        }
+
+    @staticmethod
+    def _normalise(value):
         if isinstance(value, datetime):
             return value.isoformat()
         if isinstance(value, date):
             return value.isoformat()
-        if isinstance(value, str):
-            # Already a string — try to parse and re-format for consistency
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d"):
-                try:
-                    return datetime.strptime(value, fmt).isoformat()
-                except ValueError:
-                    continue
-            return value  # Return as-is if no format matches
-        return str(value)
+        return value
 
-    def _provenance(self, field: str, local_column: str) -> dict:
-        """Build a provenance trace for a single field."""
-        return {
-            "source": self.source_name,
-            "table": self.table,
-            "local_column": local_column,
-            "retrieved_at": datetime.utcnow().isoformat() + "Z",
-        }
+    # -- querying -----------------------------------------------------
+    def _rows_for(self, mark):
+        """
+        Fetch every row this source holds for a canonical mark.
+
+        The query uses the raw values the linkage index recorded for this
+        source, which is how format divergence is bridged: the wrapper never
+        needs to know that the insurers write marks with spaces.
+        """
+        if not self.available:
+            return None
+        raws = self.link_index.raw_values(mark, self.source_name)
+        if not raws:
+            return []
+        column = self.column_for("vehicle_mark")
+        if column is None:
+            return []
+        placeholders = ", ".join(f":v{i}" for i in range(len(raws)))
+        params = {f"v{i}": raw for i, raw in enumerate(raws)}
+        sql = text(f"SELECT * FROM {self.table} WHERE {column} IN ({placeholders})")
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(sql, params).mappings().all()]
+
+    def query(self, mark):
+        """
+        Standard envelope for every source.
+
+        Returns {"status": "present"|"absent"|"error"|"unavailable",
+                 "record_count": int, "facts": {...}, "extra": {...}}
+        """
+        if not self.available:
+            return {"status": "unavailable", "record_count": 0, "facts": {},
+                    "source": self.source_name,
+                    "note": "source not reachable or no mapped table"}
+        try:
+            rows = self._rows_for(mark)
+        except Exception as exc:                       # noqa: BLE001
+            return {"status": "error", "record_count": 0, "facts": {},
+                    "source": self.source_name, "note": f"{type(exc).__name__}: {exc}"}
+
+        if not rows:
+            return {"status": "absent", "record_count": 0, "facts": {},
+                    "source": self.source_name}
+
+        return self._shape(rows)
+
+    @abstractmethod
+    def _shape(self, rows):
+        """Turn raw rows into the fact envelope for this source."""
+
+    # -- writing ------------------------------------------------------
+    # A wrapper adapts to its source's conventions, and the plate format is
+    # one of those conventions. `plate_format` is the only source-specific
+    # knowledge left in these classes; everything else comes from the mapping.
+    plate_format = "compact"
+
+    def format_mark(self, mark):
+        if self.plate_format == "hyphenated":
+            return plate_util.as_hyphenated(mark)
+        if self.plate_format == "spaced":
+            return plate_util.as_spaced(mark)
+        return mark
+
+    def insert(self, mark, values):
+        """
+        Insert one row, translating global attribute names to local columns.
+
+        `values` is keyed by global attribute. Unmapped attributes are dropped
+        rather than guessed at. Returns the inserted row's key column value so
+        the caller can compensate if a later source fails.
+        """
+        if not self.available:
+            return {"ok": False, "reason": "source unavailable"}
+        raw_mark = self.format_mark(mark)
+        columns = {self.column_for("vehicle_mark"): raw_mark}
+        for attribute, value in values.items():
+            column = self.column_for(attribute)
+            if column and value is not None:
+                columns[column] = value
+        columns = {c: v for c, v in columns.items() if c}
+        if not columns:
+            return {"ok": False, "reason": "no mapped columns for this source"}
+
+        names = list(columns)
+        binds = [f":b{i}" for i in range(len(names))]
+        params = {f"b{i}": columns[n] for i, n in enumerate(names)}
+        sql = text(f"INSERT INTO {self.table} ({', '.join(names)}) "
+                   f"VALUES ({', '.join(binds)})")
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(sql, params)
+        except Exception as exc:                       # noqa: BLE001
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "raw_mark": raw_mark, "columns": names}
+
+    def update(self, mark, values):
+        if not self.available:
+            return {"ok": False, "reason": "source unavailable"}
+        raws = self.link_index.raw_values(mark, self.source_name)
+        if not raws:
+            return {"ok": True, "changed": 0, "reason": "no row in this source"}
+        assignments, params = [], {}
+        for i, (attribute, value) in enumerate(values.items()):
+            column = self.column_for(attribute)
+            if column and value is not None:
+                assignments.append(f"{column} = :s{i}")
+                params[f"s{i}"] = value
+        if not assignments:
+            return {"ok": True, "changed": 0, "reason": "nothing mapped to update"}
+        key = self.column_for("vehicle_mark")
+        placeholders = ", ".join(f":k{i}" for i in range(len(raws)))
+        params.update({f"k{i}": raw for i, raw in enumerate(raws)})
+        sql = text(f"UPDATE {self.table} SET {', '.join(assignments)} "
+                   f"WHERE {key} IN ({placeholders})")
+        try:
+            with self.engine.begin() as conn:
+                result = conn.execute(sql, params)
+        except Exception as exc:                       # noqa: BLE001
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "changed": result.rowcount}
+
+    def delete(self, mark):
+        if not self.available:
+            return {"ok": False, "reason": "source unavailable"}
+        raws = self.link_index.raw_values(mark, self.source_name)
+        if not raws:
+            return {"ok": True, "changed": 0, "reason": "no row in this source"}
+        key = self.column_for("vehicle_mark")
+        placeholders = ", ".join(f":k{i}" for i in range(len(raws)))
+        params = {f"k{i}": raw for i, raw in enumerate(raws)}
+        sql = text(f"DELETE FROM {self.table} WHERE {key} IN ({placeholders})")
+        try:
+            with self.engine.begin() as conn:
+                result = conn.execute(sql, params)
+        except Exception as exc:                       # noqa: BLE001
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "changed": result.rowcount}
 
     def close(self):
-        """Dispose the engine."""
-        self.engine.dispose()
+        if self.engine:
+            self.engine.dispose()
 
 
-# ==========================================
-# Camera Wrapper
-# ==========================================
-
-class CameraWrapper(BaseWrapper):
-    """
-    Wraps camera.db / Capture table.
-    Returns the most recent sighting (latest captured_at) for a plate.
-    """
-
-    def query(self, vehicle_identifier: str) -> dict | None:
-        session = self.Session()
-        try:
-            # Dynamic column name from schema mapping
-            key_col = self.local_key  # e.g. "plate_id"
-            sql = text(
-                f"SELECT * FROM {self.table} "
-                f"WHERE {key_col} = :vid "
-                f"ORDER BY captured_at DESC LIMIT 1"
-            )
-            result = session.execute(sql, {"vid": vehicle_identifier}).mappings().first()
-            if result is None:
-                return None
-
-            row = dict(result)
-            return {
-                "vehicle_identifier": row[key_col],
-                "last_seen_at": self._iso(row.get("captured_at")),
-                "last_seen_location": row.get("camera_loc"),
-                "ocr_confidence": row.get("ocr_confidence"),
-                "provenance": {
-                    "last_seen_at": self._provenance("last_seen_at", "captured_at"),
-                    "last_seen_location": self._provenance("last_seen_location", "camera_loc"),
-                    "ocr_confidence": self._provenance("ocr_confidence", "ocr_confidence"),
-                },
-            }
-        finally:
-            session.close()
-
-    def insert(self, data: dict) -> bool:
-        session = self.Session()
-        try:
-            sql = text(
-                f"INSERT INTO {self.table} ({self.local_key}, camera_loc, captured_at, ocr_confidence) "
-                f"VALUES (:vid, :loc, :ts, :conf)"
-            )
-            session.execute(sql, {
-                "vid": data["plate"],
-                "loc": data.get("camera_location", "Unknown"),
-                "ts": datetime.utcnow().isoformat(),
-                "conf": data.get("ocr_confidence", 0.95),
-            })
-            session.commit()
-            return True
-        except Exception as e:
-            session.rollback()
-            print(f"[WRAPPER ERROR] Insert into {self.source_name} failed: {e}")
-            return False
-        finally:
-            session.close()
-
-    def update(self, vehicle_identifier: str, data: dict) -> bool:
-        # Camera captures are append-only; update is a no-op
-        return True
-
-
-# ==========================================
-# RTO Wrapper
-# ==========================================
+# ======================================================================
 
 class RTOWrapper(BaseWrapper):
-    """
-    Wraps rto.db / Vehicle table.
-    Returns owner and vehicle registration details.
-    """
+    source_name = "rto"
+    plate_format = "hyphenated"
 
-    def query(self, vehicle_identifier: str) -> dict | None:
-        session = self.Session()
-        try:
-            key_col = self.local_key  # e.g. "reg_num"
-            sql = text(
-                f"SELECT * FROM {self.table} WHERE {key_col} = :vid"
-            )
-            result = session.execute(sql, {"vid": vehicle_identifier}).mappings().first()
-            if result is None:
-                return None
+    def _shape(self, rows):
+        row = rows[0]
+        facts = {a: self._fact(a, row) for a in
+                 ("owner", "vehicle_category", "registered_on", "chassis", "propulsion")}
+        return {"status": "present", "record_count": len(rows),
+                "source": self.source_name,
+                "facts": {k: v for k, v in facts.items() if v}}
 
-            row = dict(result)
-            return {
-                "vehicle_identifier": row[key_col],
-                "owner": row.get("owner_name"),
-                "vehicle_class": row.get("vehicle_class"),
-                "registration_date": self._iso(row.get("registration_date")),
-                "chassis_no": row.get("chassis_no"),
-                "provenance": {
-                    "owner": self._provenance("owner", "owner_name"),
-                    "vehicle_class": self._provenance("vehicle_class", "vehicle_class"),
-                    "registration_date": self._provenance("registration_date", "registration_date"),
-                    "chassis_no": self._provenance("chassis_no", "chassis_no"),
-                },
-            }
-        finally:
-            session.close()
-
-    def insert(self, data: dict) -> bool:
-        session = self.Session()
-        try:
-            sql = text(
-                f"INSERT INTO {self.table} ({self.local_key}, owner_name, vehicle_class, registration_date, chassis_no) "
-                f"VALUES (:vid, :owner, :vclass, :regdate, :chassis)"
-            )
-            session.execute(sql, {
-                "vid": data["plate"],
-                "owner": data.get("owner_name", "Unknown"),
-                "vclass": data.get("vehicle_class", "Sedan"),
-                "regdate": data.get("registration_date", date.today().isoformat()),
-                "chassis": data.get("chassis_no", f"CH{data['plate']}AUTO"),
-            })
-            session.commit()
-            return True
-        except Exception as e:
-            session.rollback()
-            print(f"[WRAPPER ERROR] Insert into {self.source_name} failed: {e}")
-            return False
-        finally:
-            session.close()
-
-    def update(self, vehicle_identifier: str, data: dict) -> bool:
-        session = self.Session()
-        try:
-            updates = []
-            params = {"vid": vehicle_identifier}
-            if "owner_name" in data:
-                updates.append("owner_name = :owner")
-                params["owner"] = data["owner_name"]
-            if "vehicle_class" in data:
-                updates.append("vehicle_class = :vclass")
-                params["vclass"] = data["vehicle_class"]
-            if "chassis_no" in data:
-                updates.append("chassis_no = :chassis")
-                params["chassis"] = data["chassis_no"]
-            if not updates:
-                return True
-            sql = text(f"UPDATE {self.table} SET {', '.join(updates)} WHERE {self.local_key} = :vid")
-            result = session.execute(sql, params)
-            session.commit()
-            return result.rowcount > 0
-        except Exception as e:
-            session.rollback()
-            print(f"[WRAPPER ERROR] Update {self.source_name} failed: {e}")
-            return False
-        finally:
-            session.close()
-
-
-# ==========================================
-# Insurance Wrapper
-# ==========================================
 
 class InsuranceWrapper(BaseWrapper):
     """
-    Wraps insurance.db / Policy table.
-    Returns insurance status with conflict resolution:
-    even if status == 'Active', is_insured is False when expiry_date < today.
+    Returns the whole policy history, not a single flag.
+
+    Whether a vehicle is insured depends on the moment asked about, so the
+    wrapper's job is to surface every cover period it holds and let the
+    mediator evaluate them against a timestamp.
     """
+    source_name = "insurance"
+    cardinality = "many"
+    plate_format = "spaced"
 
-    def query(self, vehicle_identifier: str) -> dict | None:
-        session = self.Session()
-        try:
-            key_col = self.local_key  # e.g. "vehicle_reg_no"
-            sql = text(
-                f"SELECT * FROM {self.table} WHERE {key_col} = :vid"
-            )
-            result = session.execute(sql, {"vid": vehicle_identifier}).mappings().first()
-            if result is None:
-                return None
+    def _shape(self, rows):
+        begins_col = self.column_for("cover_begins")
+        ends_col = self.column_for("cover_ends")
 
-            row = dict(result)
-
-            # Conflict resolution: derive is_insured from expiry_date
-            expiry_raw = row.get("expiry_date")
-            if expiry_raw:
-                if isinstance(expiry_raw, str):
-                    expiry = datetime.strptime(expiry_raw, "%Y-%m-%d").date()
-                elif isinstance(expiry_raw, datetime):
-                    expiry = expiry_raw.date()
-                else:
-                    expiry = expiry_raw
-                is_insured = expiry >= date.today()
-            else:
-                is_insured = False
-
-            return {
-                "vehicle_identifier": row[key_col],
-                "is_insured": is_insured,
-                "policy_no": row.get("policy_no"),
-                "insurer_name": row.get("insurer_name"),
-                "policy_start": self._iso(row.get("start_date")),
-                "policy_expiry": self._iso(row.get("expiry_date")),
-                "policy_status_raw": row.get("status"),
-                "provenance": {
-                    "is_insured": {
-                        **self._provenance("is_insured", "expiry_date"),
-                        "derivation": "expiry_date >= today()",
-                    },
-                    "policy_no": self._provenance("policy_no", "policy_no"),
-                    "insurer_name": self._provenance("insurer_name", "insurer_name"),
-                    "policy_start": self._provenance("policy_start", "start_date"),
-                    "policy_expiry": self._provenance("policy_expiry", "expiry_date"),
-                },
-            }
-        finally:
-            session.close()
-
-    def insert(self, data: dict) -> bool:
-        session = self.Session()
-        try:
-            sql = text(
-                f"INSERT INTO {self.table} ({self.local_key}, policy_no, insurer_name, start_date, expiry_date, status) "
-                f"VALUES (:vid, :pno, :ins, :sd, :ed, :st)"
-            )
-            session.execute(sql, {
-                "vid": data["plate"],
-                "pno": data.get("policy_no", f"POL-{data['plate']}"),
-                "ins": data.get("insurer_name", "AutoGuard Ltd"),
-                "sd": data.get("start_date", date.today().isoformat()),
-                "ed": data.get("expiry_date", (date.today().replace(year=date.today().year + 1)).isoformat()),
-                "st": data.get("insurance_status", "Active"),
+        periods = []
+        for row in rows:
+            periods.append({
+                "policy_id": self._fact("policy_id", row),
+                "insurer": self._fact("insurer", row),
+                "cover_begins": self._fact("cover_begins", row),
+                "cover_ends": self._fact("cover_ends", row),
+                "declared_policy_state": self._fact("declared_policy_state", row),
+                "cover_type": self._fact("cover_type", row),
             })
-            session.commit()
-            return True
-        except Exception as e:
-            session.rollback()
-            print(f"[WRAPPER ERROR] Insert into {self.source_name} failed: {e}")
-            return False
-        finally:
-            session.close()
+        periods.sort(key=lambda p: (p["cover_begins"] or {}).get("value") or "")
 
-    def update(self, vehicle_identifier: str, data: dict) -> bool:
-        session = self.Session()
-        try:
-            updates = []
-            params = {"vid": vehicle_identifier}
-            if "policy_no" in data:
-                updates.append("policy_no = :pno")
-                params["pno"] = data["policy_no"]
-            if "insurer_name" in data:
-                updates.append("insurer_name = :ins")
-                params["ins"] = data["insurer_name"]
-            if "start_date" in data:
-                updates.append("start_date = :sd")
-                params["sd"] = data["start_date"]
-            if "expiry_date" in data:
-                updates.append("expiry_date = :ed")
-                params["ed"] = data["expiry_date"]
-            if "insurance_status" in data:
-                updates.append("status = :st")
-                params["st"] = data["insurance_status"]
-            if not updates:
-                return True
-            sql = text(f"UPDATE {self.table} SET {', '.join(updates)} WHERE {self.local_key} = :vid")
-            result = session.execute(sql, params)
-            session.commit()
-            return result.rowcount > 0
-        except Exception as e:
-            session.rollback()
-            print(f"[WRAPPER ERROR] Update {self.source_name} failed: {e}")
-            return False
-        finally:
-            session.close()
+        return {"status": "present", "record_count": len(rows),
+                "source": self.source_name,
+                "facts": {},
+                "cover_periods": periods,
+                "period_columns": {"begins": begins_col, "ends": ends_col}}
 
-# ==========================================
-# Police Wrapper
-# ==========================================
 
 class PoliceWrapper(BaseWrapper):
-    """
-    Wraps police.db / StolenRecord table.
-    Returns stolen/scrapped status.
-    """
+    source_name = "police"
 
-    def query(self, vehicle_identifier: str) -> dict | None:
-        session = self.Session()
-        try:
-            key_col = self.local_key  # e.g. "license_tag"
-            sql = text(
-                f"SELECT * FROM {self.table} WHERE {key_col} = :vid"
-            )
-            result = session.execute(sql, {"vid": vehicle_identifier}).mappings().first()
-            if result is None:
-                return None
+    def _shape(self, rows):
+        row = rows[0]
+        facts = {}
+        for attr in ("theft_flag", "scrap_flag"):
+            fact = self._fact(attr, row)
+            if fact:
+                fact["value"] = bool(fact["value"])
+                facts[attr] = fact
+        for attr in ("theft_case", "recovered_on", "scrap_certificate",
+                     "record_amended_on"):
+            fact = self._fact(attr, row)
+            if fact:
+                facts[attr] = fact
+        return {"status": "present", "record_count": len(rows),
+                "source": self.source_name, "facts": facts}
 
-            row = dict(result)
 
-            # Normalize booleans (SQLite stores as 0/1)
-            is_stolen = bool(row.get("is_stolen"))
-            is_scrapped = bool(row.get("is_scrapped"))
+class CameraWrapper(BaseWrapper):
+    """Returns every sighting, most recent first."""
+    source_name = "camera"
+    cardinality = "many"
 
-            return {
-                "vehicle_identifier": row[key_col],
-                "is_stolen": is_stolen,
-                "fir_number": row.get("fir_number"),
-                "is_scrapped": is_scrapped,
-                "status_updated_at": self._iso(row.get("status_updated_at")),
-                "provenance": {
-                    "is_stolen": self._provenance("is_stolen", "is_stolen"),
-                    "fir_number": self._provenance("fir_number", "fir_number"),
-                    "is_scrapped": self._provenance("is_scrapped", "is_scrapped"),
-                    "status_updated_at": self._provenance("status_updated_at", "status_updated_at"),
-                },
-            }
-        finally:
-            session.close()
-
-    def insert(self, data: dict) -> bool:
-        session = self.Session()
-        try:
-            sql = text(
-                f"INSERT INTO {self.table} ({self.local_key}, is_stolen, fir_number, is_scrapped, status_updated_at) "
-                f"VALUES (:vid, :stolen, :fir, :scrapped, :updated)"
-            )
-            session.execute(sql, {
-                "vid": data["plate"],
-                "stolen": 1 if data.get("is_stolen", False) else 0,
-                "fir": data.get("fir_number"),
-                "scrapped": 1 if data.get("is_scrapped", False) else 0,
-                "updated": datetime.utcnow().isoformat(),
+    def _shape(self, rows):
+        time_col = self.column_for("sighting_time")
+        sightings = []
+        for row in rows:
+            sightings.append({
+                "sighting_id": self._fact("sighting_id", row),
+                "sighting_time": self._fact("sighting_time", row),
+                "sighting_place": self._fact("sighting_place", row),
+                "read_quality": self._fact("read_quality", row),
             })
-            session.commit()
-            return True
-        except Exception as e:
-            session.rollback()
-            print(f"[WRAPPER ERROR] Insert into {self.source_name} failed: {e}")
-            return False
-        finally:
-            session.close()
+        if time_col:
+            sightings.sort(key=lambda s: (s["sighting_time"] or {}).get("value") or "",
+                           reverse=True)
+        return {"status": "present", "record_count": len(rows),
+                "source": self.source_name, "facts": {},
+                "sightings": sightings}
 
-    def update(self, vehicle_identifier: str, data: dict) -> bool:
-        session = self.Session()
-        try:
-            updates = ["status_updated_at = :updated"]
-            params = {"vid": vehicle_identifier, "updated": datetime.utcnow().isoformat()}
-            if "is_stolen" in data:
-                updates.append("is_stolen = :stolen")
-                params["stolen"] = 1 if data["is_stolen"] else 0
-            if "fir_number" in data:
-                updates.append("fir_number = :fir")
-                params["fir"] = data["fir_number"]
-            if "is_scrapped" in data:
-                updates.append("is_scrapped = :scrapped")
-                params["scrapped"] = 1 if data["is_scrapped"] else 0
-            sql = text(f"UPDATE {self.table} SET {', '.join(updates)} WHERE {self.local_key} = :vid")
-            result = session.execute(sql, params)
-            session.commit()
-            return result.rowcount > 0
-        except Exception as e:
-            session.rollback()
-            print(f"[WRAPPER ERROR] Update {self.source_name} failed: {e}")
-            return False
-        finally:
-            session.close()
 
-# ==========================================
-# Wrapper Factory
-# ==========================================
-
-def create_wrappers(schema_mapping: dict, db_dir: str = ".") -> dict:
+class MoTWrapper(BaseWrapper):
     """
-    Instantiate all four wrappers from a schema mapping config.
-
-    Args:
-        schema_mapping: The SCHEMA_MAPPING dict from schema_matcher.
-        db_dir:         Directory containing the .db files.
-
-    Returns:
-        Dict of {source_name: wrapper_instance}
+    The reporting sink. Readable like any other source, and writable — this is
+    the only source the mediator writes to as part of normal operation.
     """
-    db_paths = {
-        "camera_db":    os.path.join(db_dir, "camera.db"),
-        "rto_db":       os.path.join(db_dir, "rto.db"),
-        "insurance_db": os.path.join(db_dir, "insurance.db"),
-        "police_db":    os.path.join(db_dir, "police.db"),
-    }
+    source_name = "mot"
+    cardinality = "many"
 
-    wrapper_classes = {
-        "camera_db":    CameraWrapper,
-        "rto_db":       RTOWrapper,
-        "insurance_db": InsuranceWrapper,
-        "police_db":    PoliceWrapper,
-    }
+    def _shape(self, rows):
+        raised_col = self.column_for("raised_on")
+        findings = []
+        for row in rows:
+            findings.append({
+                "finding": self._fact("finding", row),
+                "severity": self._fact("severity", row),
+                "finding_confidence": self._fact("finding_confidence", row),
+                "evidence": self._fact("evidence", row),
+                "raised_on": self._fact("raised_on", row),
+                "source_sighting": self._fact("source_sighting", row),
+            })
+        if raised_col:
+            findings.sort(key=lambda f: (f["raised_on"] or {}).get("value") or "",
+                          reverse=True)
+        return {"status": "present", "record_count": len(rows),
+                "source": self.source_name, "facts": {},
+                "prior_findings": findings}
 
+    # -- write path ---------------------------------------------------
+    def file_report(self, report_ref, mark, finding, severity, confidence,
+                    evidence_json, triggering_read=None):
+        """Persist one compliance finding. Returns True on commit."""
+        if not self.available:
+            return False
+        cols = {
+            "vehicle_mark": self.column_for("vehicle_mark"),
+            "finding": self.column_for("finding"),
+            "severity": self.column_for("severity"),
+            "finding_confidence": self.column_for("finding_confidence"),
+            "evidence": self.column_for("evidence"),
+            "raised_on": self.column_for("raised_on"),
+            "source_sighting": self.column_for("source_sighting"),
+        }
+        if any(c is None for k, c in cols.items() if k != "source_sighting"):
+            return False
+        # the primary key column is whatever the matcher did not claim as an
+        # attribute; look it up from the table definition rather than assuming
+        pk = self._primary_key()
+        names = [pk, cols["vehicle_mark"], cols["finding"], cols["severity"],
+                 cols["finding_confidence"], cols["evidence"], cols["raised_on"]]
+        values = {"pk": report_ref, "mark": mark, "finding": finding,
+                  "severity": severity, "conf": confidence,
+                  "evidence": evidence_json, "raised": datetime.now(timezone.utc)}
+        binds = [":pk", ":mark", ":finding", ":severity", ":conf", ":evidence", ":raised"]
+        if cols["source_sighting"]:
+            names.append(cols["source_sighting"])
+            binds.append(":read")
+            values["read"] = triggering_read
+        sql = text(f"INSERT INTO {self.table} ({', '.join(names)}) "
+                   f"VALUES ({', '.join(binds)})")
+        with self.engine.begin() as conn:
+            conn.execute(sql, values)
+        return True
+
+    def _primary_key(self):
+        from sqlalchemy import inspect
+        pk = inspect(self.engine).get_pk_constraint(self.table)
+        cols = pk.get("constrained_columns") or []
+        return cols[0] if cols else "report_ref"
+
+
+# ======================================================================
+
+WRAPPER_CLASSES = {
+    "rto": RTOWrapper,
+    "insurance": InsuranceWrapper,
+    "police": PoliceWrapper,
+    "camera": CameraWrapper,
+    "mot": MoTWrapper,
+}
+
+
+def create_wrappers(mapping, link_index, db_dir="."):
+    from data_generator import DB_FILES
+
+    filenames = {label: name for name, (_, label) in DB_FILES.items()}
     wrappers = {}
-    for source_name, WrapperCls in wrapper_classes.items():
-        path = db_paths[source_name]
-        wrappers[source_name] = WrapperCls(
-            db_path=path,
-            source_name=source_name,
-            schema_mapping=schema_mapping,
-        )
-
+    for source, conf in mapping["sources"].items():
+        cls = WRAPPER_CLASSES.get(source)
+        if cls is None:
+            continue
+        path = os.path.join(db_dir, filenames.get(source, f"{source}.db"))
+        wrappers[source] = cls(path, conf, link_index)
     return wrappers
-
-
-if __name__ == "__main__":
-    # Quick test: generate mapping, create wrappers, query a plate
-    from schema_matcher import generate_mapping
-    import json
-
-    mapping = generate_mapping()
-    wrappers = create_wrappers(mapping)
-
-    # Read one plate from rto.db for testing
-    from sqlalchemy import create_engine, text as sql_text
-    engine = create_engine("sqlite:///rto.db")
-    with engine.connect() as conn:
-        row = conn.execute(sql_text("SELECT reg_num FROM Vehicle LIMIT 1")).first()
-        if row:
-            test_plate = row[0]
-            print(f"\nTesting wrappers with plate: {test_plate}\n")
-            for name, wrapper in wrappers.items():
-                result = wrapper.query(test_plate)
-                print(f"--- {name} ---")
-                print(json.dumps(result, indent=2, default=str))
-                print()
-    engine.dispose()

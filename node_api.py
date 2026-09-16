@@ -16,7 +16,7 @@ STATIC_DIR = os.path.join(HERE, "static")
 app = FastAPI(title="Node API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-engine = create_engine(f'sqlite:///{os.path.join(HERE, "rto.db")
+engine = create_engine(f'sqlite:///{os.path.join(HERE, "rto.db")}')
 
 def init_db():
     with engine.connect() as conn:
@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS vehicle_register (
         conn.commit()
 
 init_db()
-}')
 
 class SQLRequest(BaseModel):
     query: str
@@ -62,6 +61,5 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
 @app.get("/{full_path:path}")
-async def serve_ui():
+async def serve_ui(full_path: str = ""):
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
-

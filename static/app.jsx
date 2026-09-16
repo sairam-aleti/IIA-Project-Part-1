@@ -1,3 +1,4 @@
+
 function App() {
     const [query, setQuery] = React.useState('');
     const [results, setResults] = React.useState(null);
@@ -25,10 +26,9 @@ function App() {
     const submitForm = async (e) => {
         e.preventDefault();
         
-        // Generate SQL INSERT query
         const columns = Object.keys(form).join(', ');
         const values = Object.values(form).map(v => "'" + v.replace(/'/g, "''") + "'").join(', ');
-        const sql = INSERT INTO vehicle_register ( + columns + ) VALUES ( + values + );
+        const sql = `INSERT INTO vehicle_register (${columns}) VALUES (${values})`;
         
         const res = await fetch('/sql', {
             method: 'POST',
@@ -38,24 +38,23 @@ function App() {
         const data = await res.json();
         setInsertResult(data);
         if (data.success) {
-            setForm({         vehicle_mark: '',
+            setForm({ vehicle_mark: '',
         owner: '',
         vehicle_category: '',
         registered_on: '',
         chassis: '',
-        propulsion: '',
- });
+        propulsion: '', });
         }
     };
 
     return (
         <div className="container" style={{padding: '2rem'}}>
             <header className="page-header" style={{marginBottom: '2rem'}}>
-                <h1>{$node.toUpperCase()} Agency - Local Interface</h1>
+                <h1>RTO Agency - Local Interface</h1>
                 <p>Manage your local database before it is integrated by the Mediator.</p>
                 <div className="btn-group" style={{marginTop: '1rem'}}>
-                    <button className={tn  + (activeTab === 'ui' ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setActiveTab('ui')}>Add via UI</button>
-                    <button className={tn  + (activeTab === 'sql' ? 'btn-primary' : 'btn-outline-primary')} onClick={() => setActiveTab('sql')}>Manual SQL Console</button>
+                    <button className={`btn ${activeTab === 'ui' ? 'btn-primary' : 'btn-outline-primary'}`} onClick={() => setActiveTab('ui')}>Add via UI</button>
+                    <button className={`btn ${activeTab === 'sql' ? 'btn-primary' : 'btn-outline-primary'}`} onClick={() => setActiveTab('sql')}>Manual SQL Console</button>
                 </div>
             </header>
 
@@ -92,7 +91,7 @@ function App() {
                             <button type="submit" className="btn btn-success">Save Record</button>
                         </form>
                         {insertResult && (
-                            <div className={lert  + (insertResult.success ? 'alert-success' : 'alert-danger')} style={{marginTop: '1rem'}}>
+                            <div className={`alert ${insertResult.success ? 'alert-success' : 'alert-danger'}`} style={{marginTop: '1rem'}}>
                                 {insertResult.success ? 'Record added successfully!' : 'Error: ' + insertResult.error}
                             </div>
                         )}
@@ -105,7 +104,7 @@ function App() {
                     <div className="card-header">Local SQL Console</div>
                     <div className="card-body">
                         <div className="alert alert-info">
-                            <strong>Table Available:</strong> $tableName
+                            <strong>Table Available:</strong> vehicle_register
                         </div>
                         <textarea 
                             className="form-control" 

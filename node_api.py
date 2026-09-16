@@ -47,3 +47,4 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.get("/{full_path:path}")
 async def serve_ui():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+

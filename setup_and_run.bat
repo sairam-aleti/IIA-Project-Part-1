@@ -16,3 +16,4 @@ echo ssh -p 443 -R0:localhost:8000 a.pinggy.io
 echo.
 echo Then copy the pinggy URL it gives you and send it to the Mediator.
 pause
+

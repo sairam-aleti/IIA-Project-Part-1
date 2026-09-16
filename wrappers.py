@@ -24,12 +24,16 @@ strong evidence of non-insurance; an unreachable insurer is no evidence at all.
 """
 
 import os
+import requests
 from abc import ABC, abstractmethod
 from datetime import date, datetime, timezone
+from dotenv import load_dotenv
 
 from sqlalchemy import create_engine, text
 
 import plate as plate_util
+
+load_dotenv()
 
 
 def _now():
@@ -100,7 +104,20 @@ class BaseWrapper(ABC):
             return []
         placeholders = ", ".join(f":v{i}" for i in range(len(raws)))
         params = {f"v{i}": raw for i, raw in enumerate(raws)}
-        sql = text(f"SELECT * FROM {self.table} WHERE {column} IN ({placeholders})")
+        sql_str = f"SELECT * FROM {self.table} WHERE {column} IN ({placeholders})"
+        
+        node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
+        if node_url:
+            try:
+                resp = requests.post(f"{node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
+                data = resp.json()
+                if data.get("success"):
+                    return data.get("rows", [])
+            except Exception as e:
+                pass
+            return []
+
+        sql = text(sql_str)
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(sql, params).mappings().all()]
 
@@ -167,8 +184,19 @@ class BaseWrapper(ABC):
         names = list(columns)
         binds = [f":b{i}" for i in range(len(names))]
         params = {f"b{i}": columns[n] for i, n in enumerate(names)}
-        sql = text(f"INSERT INTO {self.table} ({', '.join(names)}) "
-                   f"VALUES ({', '.join(binds)})")
+        sql_str = f"INSERT INTO {self.table} ({', '.join(names)}) VALUES ({', '.join(binds)})"
+        
+        node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
+        if node_url:
+            try:
+                resp = requests.post(f"{node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
+                if not resp.json().get("success"):
+                    return {"ok": False, "reason": resp.json().get("error")}
+                return {"ok": True, "raw_mark": raw_mark, "columns": names}
+            except Exception as exc:
+                return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+        sql = text(sql_str)
         try:
             with self.engine.begin() as conn:
                 conn.execute(sql, params)
@@ -193,8 +221,19 @@ class BaseWrapper(ABC):
         key = self.column_for("vehicle_mark")
         placeholders = ", ".join(f":k{i}" for i in range(len(raws)))
         params.update({f"k{i}": raw for i, raw in enumerate(raws)})
-        sql = text(f"UPDATE {self.table} SET {', '.join(assignments)} "
-                   f"WHERE {key} IN ({placeholders})")
+        sql_str = f"UPDATE {self.table} SET {', '.join(assignments)} WHERE {key} IN ({placeholders})"
+        
+        node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
+        if node_url:
+            try:
+                resp = requests.post(f"{node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
+                if not resp.json().get("success"):
+                    return {"ok": False, "reason": resp.json().get("error")}
+                return {"ok": True, "changed": resp.json().get("affected", 0)}
+            except Exception as exc:
+                return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+        sql = text(sql_str)
         try:
             with self.engine.begin() as conn:
                 result = conn.execute(sql, params)
@@ -211,7 +250,19 @@ class BaseWrapper(ABC):
         key = self.column_for("vehicle_mark")
         placeholders = ", ".join(f":k{i}" for i in range(len(raws)))
         params = {f"k{i}": raw for i, raw in enumerate(raws)}
-        sql = text(f"DELETE FROM {self.table} WHERE {key} IN ({placeholders})")
+        sql_str = f"DELETE FROM {self.table} WHERE {key} IN ({placeholders})"
+        
+        node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
+        if node_url:
+            try:
+                resp = requests.post(f"{node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
+                if not resp.json().get("success"):
+                    return {"ok": False, "reason": resp.json().get("error")}
+                return {"ok": True, "changed": resp.json().get("affected", 0)}
+            except Exception as exc:
+                return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+        sql = text(sql_str)
         try:
             with self.engine.begin() as conn:
                 result = conn.execute(sql, params)

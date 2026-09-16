@@ -34,6 +34,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+import requests
 from pydantic import BaseModel, Field
 
 import plate as plate_util
@@ -446,21 +447,34 @@ async def execute_sql(body: SQLRequest):
     targets = list(mediator.wrappers.keys()) if body.target == "all" else [body.target]
     
     for t in targets:
+        target = t
         wrapper = mediator.wrappers.get(t)
         if not wrapper:
-            results[t] = {"error": f"Target database '{t}' not found"}
+            results[target] = {"error": f"Target database '{target}' not found"}
             continue
-            
+        node_url = os.environ.get(f"{target.upper()}_NODE_URL")
+        if node_url:
+            try:
+                resp = requests.post(f"{node_url}/sql", json={"query": body.query}, timeout=10)
+                results[target] = resp.json()
+            except Exception as e:
+                results[target] = {"error": f"Failed to tunnel to node: {str(e)}"}
+            continue
+
+        if not wrapper.available:
+            results[target] = {"error": "database not available"}
+            continue
         try:
             with wrapper.engine.connect() as conn:
-                rs = conn.execute(text(body.query))
-                if rs.returns_rows:
-                    results[t] = {"rows": [dict(r) for r in rs.mappings().all()]}
+                result = conn.execute(text(body.query))
+                if body.query.strip().upper().startswith("SELECT"):
+                    rows = [dict(row._mapping) for row in result]
+                    results[target] = {"rows": rows}
                 else:
                     conn.commit()
-                    results[t] = {"rows_affected": rs.rowcount}
-        except Exception as exc:
-            results[t] = {"error": str(exc)}
+                    results[target] = {"affected": result.rowcount}
+        except Exception as e:
+            results[target] = {"error": str(e)}
             
     return results
 

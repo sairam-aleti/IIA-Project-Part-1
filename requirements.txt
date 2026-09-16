@@ -17,3 +17,6 @@ Faker>=24.0
 Levenshtein>=0.25
 sentence-transformers>=2.6
 numpy>=1.26
+
+python-dotenv
+requests

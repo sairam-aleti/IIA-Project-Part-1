@@ -16,7 +16,22 @@ STATIC_DIR = os.path.join(HERE, "static")
 app = FastAPI(title="Node API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-engine = create_engine(f'sqlite:///{os.path.join(HERE, "police.db")}')
+engine = create_engine(f'sqlite:///{os.path.join(HERE, "police.db")
+
+def init_db():
+    with engine.connect() as conn:
+        conn.execute(text("""
+CREATE TABLE IF NOT EXISTS stolen_vehicles (
+    vehicle_mark TEXT PRIMARY KEY,
+    reported_stolen_on DATE,
+    fir_number TEXT,
+    status TEXT
+)
+"""))
+        conn.commit()
+
+init_db()
+}')
 
 class SQLRequest(BaseModel):
     query: str

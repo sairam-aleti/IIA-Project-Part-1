@@ -1,6 +1,6 @@
 # 🚀 GAV Mediator - Teammate Node Setup Guide
 
-Welcome to the project! As a node operator (RTO, Police, or Insurance), your job is to run your local database node and securely expose it to the Team Leader's Mediator over the internet. 
+Welcome to the project! As a node operator (RTO, Police, or Insurance), your job is to run your local database node and securely expose it to the Mediator over the internet. 
 
 **Please follow these instructions carefully to avoid common setup errors.**
 
@@ -55,10 +55,10 @@ To view your node's dashboard and insert test data, manually type this exact add
 
 ---
 
-## Step 4: Expose Your Node to the Team Leader
-The Team Leader needs a public URL to connect to your local node. Depending on your internet connection (University WiFi vs Mobile Hotspot), some tunnels might be blocked by firewalls. 
+## Step 4: Expose Your Node to the Mediator
+The Mediator needs a public URL to connect to your local node. Depending on your internet connection (University WiFi vs Mobile Hotspot), some tunnels might be blocked by firewalls. 
 
-Try these options in order. **Once you get a link, copy it and send it to your Team Leader immediately!**
+Try these options in order. **Once you get a link, copy it and send it to the Mediator immediately!**
 
 ### Option A: Serveo (Recommended if using a Mobile Hotspot)
 If you are connected to a mobile hotspot, Serveo is extremely fast and reliable.
@@ -84,4 +84,4 @@ If the second black window that popped up in Step 2 successfully printed a giant
 ---
 
 ### 🎉 You are done!
-Once your Team Leader puts your link into their `.env` file, your node is fully integrated into the distributed system. You can use your dashboard to add/delete records, and the Mediator will instantly be able to query them across the internet!
+Once the Mediator puts your link into their `.env` file, your node is fully integrated into the distributed system. You can use your dashboard to add/delete records, and the Mediator will instantly be able to query them across the internet!

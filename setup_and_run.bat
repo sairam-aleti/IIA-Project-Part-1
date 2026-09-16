@@ -11,10 +11,13 @@ echo =========================================
 echo Server is running on port 8000!
 echo Access the local dashboard at: http://localhost:8000/
 echo.
-echo IMPORTANT: To expose this node to the internet, run this command:
-echo ssh -p 443 -R0:localhost:8000 a.pinggy.io
+echo Starting secure internet tunnel (Pinggy)...
+start cmd /k "ssh -o StrictHostKeyChecking=no -p 443 -R0:localhost:8000 a.pinggy.io"
 echo.
-echo Then copy the pinggy URL it gives you and send it to the Mediator.
+echo =========================================
+echo A second black window just opened!
+echo Look inside that new window for your public URL (it ends in .pinggy.link).
+echo Copy that URL and text it to your Team Leader immediately.
+echo (Note: The free tunnel expires after 60 minutes. Just restart this script if it drops).
+echo =========================================
 pause
-
-

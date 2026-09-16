@@ -27,13 +27,14 @@ so atomicity has to be built rather than claimed.
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Dict
+from sqlalchemy import text
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import plate as plate_util
 from mediator import RULES, GAVMediator
@@ -86,6 +87,7 @@ class VehicleCreate(BaseModel):
     model_config = {"extra": "allow"}
 
     plate: str
+    targets: Dict[str, bool] = Field(default_factory=lambda: {"rto": True, "insurance": True, "police": True, "camera": True})
     owner: Optional[str] = None
     vehicle_category: Optional[str] = None
     registered_on: Optional[str] = None
@@ -118,6 +120,10 @@ class VehicleUpdate(BaseModel):
     theft_flag: Optional[bool] = None
     theft_case: Optional[str] = None
     scrap_flag: Optional[bool] = None
+
+class SQLRequest(BaseModel):
+    query: str
+    target: str
 
 
 # Which global attributes each source is allowed to be given on a write.
@@ -351,6 +357,8 @@ async def create_vehicle(body: VehicleCreate):
     payload = normalise_fields(body.model_dump())
     committed, results = [], {}
     for source, attributes in WRITE_SCOPE.items():
+        if not body.targets.get(source, False):
+            continue
         wrapper = mediator.wrappers.get(source)
         if wrapper is None:
             continue
@@ -430,6 +438,31 @@ async def remove_vehicle(plate: str):
     return {"message": f"{mark} removed from all operational sources. "
                        f"Ministry findings are retained for audit.",
             "canonical_mark": mark, "per_source": results}
+
+@app.post("/api/v1/sql")
+async def execute_sql(body: SQLRequest):
+    mediator = _require_mediator()
+    results = {}
+    targets = list(mediator.wrappers.keys()) if body.target == "all" else [body.target]
+    
+    for t in targets:
+        wrapper = mediator.wrappers.get(t)
+        if not wrapper:
+            results[t] = {"error": f"Target database '{t}' not found"}
+            continue
+            
+        try:
+            with wrapper.engine.connect() as conn:
+                rs = conn.execute(text(body.query))
+                if rs.returns_rows:
+                    results[t] = {"rows": [dict(r) for r in rs.mappings().all()]}
+                else:
+                    conn.commit()
+                    results[t] = {"rows_affected": rs.rowcount}
+        except Exception as exc:
+            results[t] = {"error": str(exc)}
+            
+    return results
 
 
 def _rebuild_index(mediator):

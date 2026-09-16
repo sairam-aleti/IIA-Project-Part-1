@@ -620,6 +620,7 @@ function AddVehiclePage({ onNavigate, toast }) {
         is_stolen: false, fir_number: '', is_scrapped: false,
     });
     const [saving, setSaving] = useState(false);
+    const [targets, setTargets] = useState({ rto: true, insurance: true, police: true, camera: true });
 
     const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
@@ -631,7 +632,7 @@ function AddVehiclePage({ onNavigate, toast }) {
             const res = await fetch(`${API}/api/v1/vehicle`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ...form, plate: form.plate.trim().toUpperCase() }),
+                body: JSON.stringify({ ...form, plate: form.plate.trim().toUpperCase(), targets }),
             });
             const data = await res.json();
             if (res.ok) {
@@ -651,7 +652,23 @@ function AddVehiclePage({ onNavigate, toast }) {
         <div className="page-enter">
             <div className="section-header">
                 <h2>Register New Vehicle</h2>
-                <div className="section-desc">This will insert records into all 4 source databases (RTO, Insurance, Police, Camera).</div>
+                <div className="section-desc">Select which databases to insert records into. Uncheck databases to simulate ragged coverage.</div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 20 }}>
+                <div className="card-header">Target Databases</div>
+                <div className="card-body" style={{ display: 'flex', gap: 20 }}>
+                    {['rto', 'insurance', 'police', 'camera'].map(db => (
+                        <label key={db} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                            <input 
+                                type="checkbox" 
+                                checked={targets[db]} 
+                                onChange={e => setTargets(prev => ({ ...prev, [db]: e.target.checked }))} 
+                            />
+                            <span style={{ textTransform: 'capitalize', fontWeight: 500 }}>{db}</span>
+                        </label>
+                    ))}
+                </div>
             </div>
 
             <div className="card">
@@ -1218,6 +1235,81 @@ function UnresolvedPage({ onNavigate, toast }) {
 }
 
 // ============================================================
+// SQL Console
+// ============================================================
+
+function SqlConsolePage({ toast }) {
+    const [query, setQuery] = useState('SELECT * FROM theft_and_scrap_register LIMIT 5');
+    const [target, setTarget] = useState('police');
+    const [results, setResults] = useState(null);
+    const [running, setRunning] = useState(false);
+
+    const execute = async () => {
+        setRunning(true);
+        setResults(null);
+        try {
+            const res = await fetch(`${API}/api/v1/sql`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, target })
+            });
+            const data = await res.json();
+            setResults(data);
+            if (!res.ok) toast('Error executing query', 'error');
+        } catch (e) {
+            toast('Failed to connect to API', 'error');
+        } finally {
+            setRunning(false);
+        }
+    };
+
+    return (
+        <div className="page-enter">
+            <div className="section-header">
+                <h2>SQL Console (Manual Agency Override)</h2>
+                <div className="section-desc">Execute raw SQL against the autonomous databases. Simulates manual data entry by local officers.</div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 20 }}>
+                <div className="card-body">
+                    <div style={{ display: 'flex', gap: 10, marginBottom: 15 }}>
+                        <select className="form-select" value={target} onChange={e => setTarget(e.target.value)} style={{ width: 200 }}>
+                            <option value="police">Police (police.db)</option>
+                            <option value="rto">RTO (rto.db)</option>
+                            <option value="insurance">Insurance (insurance.db)</option>
+                            <option value="camera">Camera (camera.db)</option>
+                            <option value="mot">MoT (mot.db)</option>
+                            <option value="all">All Databases</option>
+                        </select>
+                        <button className="btn btn-primary" onClick={execute} disabled={running}>
+                            {running ? 'Executing...' : 'Execute SQL'}
+                        </button>
+                    </div>
+                    <textarea 
+                        className="form-input" 
+                        style={{ fontFamily: 'monospace', height: 120, resize: 'vertical' }}
+                        value={query}
+                        onChange={e => setQuery(e.target.value)}
+                        placeholder="SELECT * FROM ..."
+                    />
+                </div>
+            </div>
+
+            {results && (
+                <div className="card">
+                    <div className="card-header">Results</div>
+                    <div className="card-body" style={{ padding: 0 }}>
+                        <pre style={{ margin: 0, padding: 15, backgroundColor: '#1e1e1e', color: '#d4d4d4', overflowX: 'auto', fontSize: '0.85rem' }}>
+                            {JSON.stringify(results, null, 2)}
+                        </pre>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ============================================================
 // App Root
 // ============================================================
 
@@ -1238,6 +1330,7 @@ function App() {
         { id: 'unresolved', label: 'Unattributed' },
         { id: 'reports', label: 'Reports' },
         { id: 'schema', label: 'Schema Mapping' },
+        { id: 'sql', label: 'SQL Console' },
     ];
 
     let content;
@@ -1251,6 +1344,7 @@ function App() {
         case 'unresolved': content = <UnresolvedPage onNavigate={navigate} toast={addToast} />; break;
         case 'reports': content = <ReportsPage onNavigate={navigate} toast={addToast} />; break;
         case 'schema': content = <SchemaPage toast={addToast} />; break;
+        case 'sql': content = <SqlConsolePage toast={addToast} />; break;
         default: content = <DashboardPage onNavigate={navigate} toast={addToast} />;
     }
 

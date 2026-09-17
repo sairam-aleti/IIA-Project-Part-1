@@ -57,6 +57,18 @@ async def execute_sql(body: SQLRequest):
 async def health():
     return {"status": "ok", "node": "insurance"}
 
+@app.get("/schema")
+async def schema():
+    from sqlalchemy import inspect
+    inspector = inspect(engine)
+    tables = {}
+    for table in inspector.get_table_names():
+        tables[table] = [
+            {"name": col["name"], "kind": str(col["type"])}
+            for col in inspector.get_columns(table)
+        ]
+    return {"tables": tables}
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")

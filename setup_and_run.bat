@@ -12,7 +12,7 @@ echo Server is running on port 8000!
 echo Access the local dashboard at: http://localhost:8000/
 echo.
 echo Starting secure internet tunnel (Pinggy)...
-start cmd /k "ssh -o StrictHostKeyChecking=no -p 443 -R0:localhost:8000 a.pinggy.io"
+start cmd /k "ssh -o StrictHostKeyChecking=no -p 443 -R0:127.0.0.1:8000 a.pinggy.io"
 echo.
 echo =========================================
 echo A second black window just opened!

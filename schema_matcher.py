@@ -324,10 +324,35 @@ class _SemanticScorer:
 # ======================================================================
 
 def reflect(db_sources=None, db_dir="."):
-    """Read table and column metadata, with types, from every source."""
+    """Read table and column metadata, with types, from every source.
+    
+    If a remote node URL is configured for a source, fetches schema
+    dynamically via GET /schema instead of reading a local .db file.
+    """
+    import requests as _requests
     db_sources = db_sources or DB_SOURCES
     schemas = {}
     for source, filename in db_sources.items():
+        # Try remote node first
+        node_url = os.environ.get(f"{source.upper()}_NODE_URL")
+        if node_url:
+            try:
+                resp = _requests.get(f"{node_url}/schema", timeout=10)
+                data = resp.json()
+                tables = {}
+                for tname, columns in data.get("tables", {}).items():
+                    tables[tname] = [
+                        {"name": col["name"], "kind": col.get("kind", "text")}
+                        for col in columns
+                    ]
+                if tables:
+                    schemas[source] = tables
+                    print(f"  {source}: schema fetched from remote node")
+                    continue
+            except Exception as e:
+                print(f"  Warning: could not fetch schema from {source} node: {e}")
+
+        # Fall back to local .db file
         path = os.path.join(db_dir, filename)
         if not os.path.exists(path):
             continue
@@ -365,8 +390,25 @@ INSTANCE_SAMPLE = 60
 INSTANCE_WEIGHT = 0.60
 
 
-def sample_column(db_path, table, column, limit=INSTANCE_SAMPLE):
-    """Read up to `limit` non-null values from a column."""
+def sample_column(db_path, table, column, limit=INSTANCE_SAMPLE, node_url=None):
+    """Read up to `limit` non-null values from a column.
+    
+    If node_url is provided, fetches samples from the remote node.
+    """
+    if node_url:
+        try:
+            import requests as _requests
+            query = (f'SELECT "{column}" FROM {table} '
+                     f'WHERE "{column}" IS NOT NULL LIMIT {int(limit)}')
+            resp = _requests.post(f"{node_url}/sql",
+                                  json={"query": query, "params": {}},
+                                  timeout=10)
+            data = resp.json()
+            if data.get("success"):
+                return [r.get(column) for r in data.get("rows", []) if r.get(column) is not None]
+        except Exception:
+            pass
+        return []
     try:
         engine = create_engine(f"sqlite:///{db_path}")
         with engine.connect() as conn:
@@ -401,7 +443,7 @@ def plate_likeness(values):
 # Matching
 # ======================================================================
 
-def match_source(source, tables, scorer, verbose=False, db_path=None):
+def match_source(source, tables, scorer, verbose=False, db_path=None, node_url=None):
     """
     Produce an attribute-level mapping for one source.
 
@@ -444,12 +486,12 @@ def match_source(source, tables, scorer, verbose=False, db_path=None):
             grid.append(row)
 
         # Instance evidence for the identifier column only.
-        if "vehicle_mark" in wanted and db_path:
+        if "vehicle_mark" in wanted and (db_path or node_url):
             j = wanted.index("vehicle_mark")
             for i, name in enumerate(col_names):
                 if col_kinds[i] != "text":
                     continue
-                likeness = plate_likeness(sample_column(db_path, table, name))
+                likeness = plate_likeness(sample_column(db_path, table, name, node_url=node_url))
                 grid[i][j]["instance"] = round(likeness, 4)
                 grid[i][j]["score"] += INSTANCE_WEIGHT * likeness
 
@@ -518,12 +560,13 @@ def match_schemas(db_sources=None, db_dir=".", verbose=True):
         print()
 
     sources = db_sources or DB_SOURCES
-    mapping = {
-        source: match_source(
+    mapping = {}
+    for source, tables in schemas.items():
+        nurl = os.environ.get(f"{source.upper()}_NODE_URL")
+        mapping[source] = match_source(
             source, tables, scorer, verbose,
-            db_path=os.path.join(db_dir, sources.get(source, f"{source}.db")))
-        for source, tables in schemas.items()
-    }
+            db_path=os.path.join(db_dir, sources.get(source, f"{source}.db")),
+            node_url=nurl)
 
     return {
         "mode": "semantic+lexical" if scorer.available else "lexical",

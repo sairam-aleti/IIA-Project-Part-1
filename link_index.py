@@ -72,15 +72,28 @@ class LinkIndex:
             column = mark_attr["column"]
             table = conf["table"]
             path = os.path.join(self.db_dir, filenames.get(source, f"{source}.db"))
-            if not os.path.exists(path):
+            node_url = os.environ.get(f"{source.upper()}_NODE_URL")
+            rows = []
+            if node_url:
+                try:
+                    import requests
+                    resp = requests.post(f"{node_url}/sql", json={"query": f"SELECT {column} FROM {table}", "params": {}}, timeout=10)
+                    data = resp.json()
+                    if data.get("success"):
+                        # Extract the column values from the list of dicts
+                        rows = [(r.get(column),) for r in data.get("rows", [])]
+                except Exception as e:
+                    print(f"Warning: Failed to fetch index from remote {source}: {e}")
+                    
+            if not rows and os.path.exists(path):
+                engine = create_engine(f"sqlite:///{path}")
+                with engine.connect() as conn:
+                    rows = conn.execute(text(f"SELECT {column} FROM {table}")).fetchall()
+                engine.dispose()
+            elif not rows and not os.path.exists(path):
                 self.stats[source] = {"rows": 0, "linked": 0, "malformed": 0,
                                       "unavailable": True}
                 continue
-
-            engine = create_engine(f"sqlite:///{path}")
-            with engine.connect() as conn:
-                rows = conn.execute(text(f"SELECT {column} FROM {table}")).fetchall()
-            engine.dispose()
 
             linked = malformed = 0
             for (raw,) in rows:

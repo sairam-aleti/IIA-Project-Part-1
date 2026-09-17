@@ -52,8 +52,9 @@ class BaseWrapper(ABC):
         self.attributes = source_conf.get("attributes", {})
         self.unmapped = source_conf.get("unmapped", [])
         self.link_index = link_index
-        self.available = bool(self.table) and os.path.exists(db_path)
-        self.engine = create_engine(f"sqlite:///{db_path}") if self.available else None
+        self.node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
+        self.available = bool(self.table) and (bool(self.node_url) or os.path.exists(db_path))
+        self.engine = create_engine(f"sqlite:///{db_path}") if (bool(self.table) and os.path.exists(db_path)) else None
 
     # -- mapping helpers ----------------------------------------------
     def column_for(self, attribute):
@@ -106,17 +107,20 @@ class BaseWrapper(ABC):
         params = {f"v{i}": raw for i, raw in enumerate(raws)}
         sql_str = f"SELECT * FROM {self.table} WHERE {column} IN ({placeholders})"
         
-        node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
-        if node_url:
+        if self.node_url:
             try:
-                resp = requests.post(f"{node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
+                resp = requests.post(f"{self.node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
                 data = resp.json()
                 if data.get("success"):
                     return data.get("rows", [])
+                return []
+            except (requests.ConnectionError, requests.Timeout) as e:
+                raise ConnectionError(f"{self.source_name} node unreachable: {e}") from e
             except Exception as e:
-                pass
-            return []
+                raise ConnectionError(f"{self.source_name} node error: {e}") from e
 
+        if not self.engine:
+            return None
         sql = text(sql_str)
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(sql, params).mappings().all()]
@@ -186,10 +190,9 @@ class BaseWrapper(ABC):
         params = {f"b{i}": columns[n] for i, n in enumerate(names)}
         sql_str = f"INSERT INTO {self.table} ({', '.join(names)}) VALUES ({', '.join(binds)})"
         
-        node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
-        if node_url:
+        if self.node_url:
             try:
-                resp = requests.post(f"{node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
+                resp = requests.post(f"{self.node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
                 if not resp.json().get("success"):
                     return {"ok": False, "reason": resp.json().get("error")}
                 return {"ok": True, "raw_mark": raw_mark, "columns": names}
@@ -223,10 +226,9 @@ class BaseWrapper(ABC):
         params.update({f"k{i}": raw for i, raw in enumerate(raws)})
         sql_str = f"UPDATE {self.table} SET {', '.join(assignments)} WHERE {key} IN ({placeholders})"
         
-        node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
-        if node_url:
+        if self.node_url:
             try:
-                resp = requests.post(f"{node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
+                resp = requests.post(f"{self.node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
                 if not resp.json().get("success"):
                     return {"ok": False, "reason": resp.json().get("error")}
                 return {"ok": True, "changed": resp.json().get("affected", 0)}
@@ -252,10 +254,9 @@ class BaseWrapper(ABC):
         params = {f"k{i}": raw for i, raw in enumerate(raws)}
         sql_str = f"DELETE FROM {self.table} WHERE {key} IN ({placeholders})"
         
-        node_url = os.environ.get(f"{self.source_name.upper()}_NODE_URL")
-        if node_url:
+        if self.node_url:
             try:
-                resp = requests.post(f"{node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
+                resp = requests.post(f"{self.node_url}/sql", json={"query": sql_str, "params": params}, timeout=10)
                 if not resp.json().get("success"):
                     return {"ok": False, "reason": resp.json().get("error")}
                 return {"ok": True, "changed": resp.json().get("affected", 0)}

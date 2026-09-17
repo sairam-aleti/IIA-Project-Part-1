@@ -185,6 +185,74 @@ def _require_mediator():
 async def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
+@app.post("/api/v1/sync")
+async def sync():
+    global _mapping, _mediator
+    _mapping = generate_mapping(db_dir=HERE, verbose=True)
+    _mediator = GAVMediator(_mapping, db_dir=HERE)
+    return {"status": "success"}
+
+@app.post("/api/v1/seed")
+async def seed_network():
+    import random
+    
+    rto_url = os.environ.get("RTO_NODE_URL")
+    ins_url = os.environ.get("INSURANCE_NODE_URL")
+    pol_url = os.environ.get("POLICE_NODE_URL")
+    
+    queries = []
+    
+    # 5 random vehicles
+    for i in range(5):
+        plate = f"MH{random.randint(10,99)}AB{random.randint(1000,9999)}"
+        # RTO
+        if rto_url:
+            rto_q = f"INSERT INTO vehicle_register (vehicle_mark, owner, vehicle_category, registered_on, chassis, propulsion) VALUES ('{plate}', 'Test Owner {i}', 'Car', '2020-01-01', 'CH{i}', 'Petrol');"
+            queries.append((rto_url, rto_q))
+        
+        # Insurance
+        if ins_url and i != 4:  # leave 5th uninsured
+            ins_q = f"INSERT INTO insurance_policies (vehicle_mark, insurer, policy_number, cover_start, cover_upto, status) VALUES ('{plate}', 'Test Insurer', 'POL{i}', '2020-01-01', '2030-01-01', 'Active');"
+            queries.append((ins_url, ins_q))
+
+        # Police (Flag the 2nd vehicle as stolen)
+        if pol_url and i == 1:
+            pol_q = f"INSERT INTO stolen_vehicles (vehicle_mark, reported_stolen_on, fir_number, status) VALUES ('{plate}', '2023-05-10', 'FIR-{i}', 'Active');"
+            queries.append((pol_url, pol_q))
+
+    # Add one insured but unregistered for contradiction
+    if ins_url:
+         queries.append((ins_url, f"INSERT INTO insurance_policies (vehicle_mark, insurer, policy_number, cover_start, cover_upto, status) VALUES ('FAKE{random.randint(10,99)}', 'Test Insurer', 'POL-FAKE', '2020-01-01', '2030-01-01', 'Active');"))
+
+    import requests
+    for url, q in queries:
+        try:
+            requests.post(f"{url}/sql", json={"query": q}, timeout=5)
+        except:
+            pass
+            
+    # Sync index automatically!
+    global _mapping, _mediator
+    _mapping = generate_mapping(db_dir=HERE, verbose=True)
+    _mediator = GAVMediator(_mapping, db_dir=HERE)
+    
+    return {"status": "success"}
+
+@app.get("/api/v1/network_logs")
+async def network_logs():
+    logs = {}
+    for node in ["RTO", "INSURANCE", "POLICE"]:
+        url = os.environ.get(f"{node}_NODE_URL")
+        if url:
+            try:
+                import requests
+                resp = requests.get(f"{url}/logs", timeout=5)
+                if resp.status_code == 200:
+                    logs[node.lower()] = resp.json().get("logs", [])
+            except Exception as e:
+                logs[node.lower()] = [f"Failed to fetch logs: {str(e)}"]
+    return logs
+
 
 @app.get("/health")
 async def health():

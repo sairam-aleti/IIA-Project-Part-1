@@ -141,6 +141,27 @@ function DashboardPage({ onNavigate, toast }) {
         }
     };
 
+    const doSync = async () => {
+        try {
+            await fetch(`${API}/api/v1/sync`, { method: 'POST' });
+            toast('Network synced successfully', 'success');
+            setTimeout(() => window.location.reload(), 1000);
+        } catch {
+            toast('Failed to sync network', 'error');
+        }
+    };
+
+    const doSeed = async () => {
+        try {
+            toast('Seeding network... This may take a moment', 'info');
+            await fetch(`${API}/api/v1/seed`, { method: 'POST' });
+            toast('Network seeded successfully', 'success');
+            setTimeout(() => window.location.reload(), 1000);
+        } catch {
+            toast('Failed to seed network', 'error');
+        }
+    };
+
     return (
         <div className="page-enter">
             {stats && (
@@ -183,6 +204,11 @@ function DashboardPage({ onNavigate, toast }) {
                         {searching ? <><span className="spinner"></span>Searching...</> : 'Search'}
                     </button>
                 </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '10px', marginTop: '30px' }}>
+                <button className="btn btn-outline" onClick={doSync}>🔄 Sync Network</button>
+                <button className="btn btn-primary" onClick={doSeed}>🌱 Seed Network</button>
             </div>
         </div>
     );
@@ -545,12 +571,11 @@ function AllVehiclesPage({ onNavigate, toast }) {
     return (
         <div className="page-enter">
             <div className="section-header">
-                <h2>All Vehicles Directory</h2>
+                <h2>All Vehicles</h2>
                 <div className="section-actions">
                     <div className="filter-bar">
                         <input className="form-input" placeholder="Search by plate or owner..." value={filter} onChange={e => setFilter(e.target.value)} />
                     </div>
-                    <button className="btn btn-primary btn-sm" onClick={() => onNavigate('add')}>Add Vehicle</button>
                     <button className="btn btn-outline btn-sm" onClick={load}>Refresh</button>
                 </div>
             </div>
@@ -581,10 +606,8 @@ function AllVehiclesPage({ onNavigate, toast }) {
                                         <td>{v.is_stolen ? <Badge type="red">Yes</Badge> : <Badge type="green">No</Badge>}</td>
                                         <td>{v.is_scrapped ? <Badge type="orange">Yes</Badge> : <Badge type="neutral">No</Badge>}</td>
                                         <td>
-                                            <div style={{ display:'flex', gap: 4 }}>
+                                            <div className="btn-group">
                                                 <button className="btn btn-ghost btn-sm" onClick={() => viewReport(v.vehicle_identifier)}>View</button>
-                                                <button className="btn btn-ghost btn-sm" onClick={() => onNavigate('edit', { plate: v.vehicle_identifier })}>Edit</button>
-                                                <button className="btn btn-ghost btn-sm" style={{ color: 'var(--red)' }} onClick={() => setDelModal(v.vehicle_identifier)}>Del</button>
                                             </div>
                                         </td>
                                     </tr>
@@ -1313,6 +1336,45 @@ function SqlConsolePage({ toast }) {
 // App Root
 // ============================================================
 
+function NetworkLogsPage({ toast }) {
+    const [logs, setLogs] = useState({});
+    const [loading, setLoading] = useState(false);
+
+    const load = async () => {
+        setLoading(true);
+        try {
+            const r = await fetch(API + '/api/v1/network_logs');
+            const data = await r.json();
+            setLogs(data);
+        } catch (e) {
+            toast('error', 'Failed to fetch network logs: ' + e.message);
+        }
+        setLoading(false);
+    };
+
+    useEffect(() => { load(); }, []);
+
+    return (
+        <div className="page-enter card">
+            <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h2>Distributed Network Logs</h2>
+                <button className="btn btn-outline btn-sm" onClick={load} disabled={loading}>Refresh</button>
+            </div>
+            <div className="card-body">
+                {Object.keys(logs).length === 0 && <p className="text-secondary">No logs available. Click refresh.</p>}
+                {Object.entries(logs).map(([node, nodeLogs]) => (
+                    <div key={node} style={{ marginBottom: '20px' }}>
+                        <h3 style={{ textTransform: 'uppercase', color: 'var(--primary)', marginBottom: '10px' }}>{node} NODE</h3>
+                        <pre style={{ background: '#f5f5f5', padding: '15px', overflowX: 'auto', fontSize: '13px', border: '1px solid #e2e8f0', borderRadius: '4px', whiteSpace: 'pre-wrap' }}>
+                            {nodeLogs.length > 0 ? nodeLogs.join('') : 'No logs generated yet.'}
+                        </pre>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 function App() {
     const [page, setPage] = useState('dashboard');
     const [pageData, setPageData] = useState({});
@@ -1331,6 +1393,7 @@ function App() {
         { id: 'reports', label: 'Reports' },
         { id: 'schema', label: 'Schema Mapping' },
         { id: 'sql', label: 'SQL Console' },
+        { id: 'logs', label: 'Network Logs' },
     ];
 
     let content;
@@ -1345,6 +1408,7 @@ function App() {
         case 'reports': content = <ReportsPage onNavigate={navigate} toast={addToast} />; break;
         case 'schema': content = <SchemaPage toast={addToast} />; break;
         case 'sql': content = <SqlConsolePage toast={addToast} />; break;
+        case 'logs': content = <NetworkLogsPage toast={addToast} />; break;
         default: content = <DashboardPage onNavigate={navigate} toast={addToast} />;
     }
 

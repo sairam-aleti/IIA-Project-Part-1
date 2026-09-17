@@ -57,6 +57,16 @@ async def execute_sql(body: SQLRequest):
 async def health():
     return {"status": "ok", "node": "insurance"}
 
+@app.get("/logs")
+async def get_logs():
+    try:
+        with open("system.log", "r") as f:
+            lines = f.readlines()
+        # Return the last 50 lines to avoid massive payloads
+        return {"success": True, "logs": lines[-50:]}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 @app.get("/schema")
 async def schema():
     from sqlalchemy import inspect

@@ -115,21 +115,10 @@ function App() {
                             {results.error ? (
                                 <div style={{ color: 'red' }}>Error: {results.error}</div>
                             ) : (
-                                <div style={{ overflowX: 'auto' }}>
-                                    <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '10px' }}>
-                                        <thead>
-                                            <tr>
-                                                {results.columns?.map(c => <th key={c} style={{ border: '1px solid #ddd', padding: '8px', background: '#eee' }}>{c}</th>)}
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {results.rows?.map((r, i) => (
-                                                <tr key={i}>
-                                                    {r.map((val, j) => <td key={j} style={{ border: '1px solid #ddd', padding: '8px' }}>{val}</td>)}
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
+                                <div style={{ overflowX: 'auto', background: '#f8f9fa', padding: '1rem', borderRadius: '4px' }}>
+                                    <pre style={{ margin: 0 }}>
+                                        {JSON.stringify(results, null, 2)}
+                                    </pre>
                                 </div>
                             )}
                         </div>
